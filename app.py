@@ -1,8 +1,18 @@
+import os
 import zipfile
+import shutil
 
-# --- Unzip models if not already extracted ---
+# --- Join & extract split model zip files ---
 if not os.path.exists("savedmodels2"):
-    with zipfile.ZipFile("savedmodels2.zip", 'r') as zip_ref:
+    with open("savedmodels2_combined.zip", "wb") as wfd:
+        for part_num in range(1, 3):  # You have 2 parts
+            part_filename = f"savedmodels2_2.zip.00{part_num}"
+            if not os.path.exists(part_filename):
+                raise FileNotFoundError(f"Missing zip part: {part_filename}")
+            with open(part_filename, "rb") as fd:
+                shutil.copyfileobj(fd, wfd)
+
+    with zipfile.ZipFile("savedmodels2_combined.zip", "r") as zip_ref:
         zip_ref.extractall(".")
 
 import streamlit as st
