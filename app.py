@@ -1,6 +1,10 @@
+# --- IMPORTS ---
 import streamlit as st
 import numpy as np
 import os
+import zipfile
+import shutil
+import pickle
 import cv2
 import tensorflow as tf
 from tensorflow.keras.models import Model
@@ -8,35 +12,32 @@ from tensorflow.keras.layers import GlobalAveragePooling2D, Dense, Dropout
 from tensorflow.keras.applications import DenseNet121, InceptionV3, MobileNetV2
 from tensorflow.keras.preprocessing import image as keras_image
 from tensorflow.keras.regularizers import l2
-import zipfile
-import glob
+
+# --- UNZIP IF NEEDED ---
+SPLIT_PARTS = ["savedmodels2_2.zip.001", "savedmodels2_2.zip.002"]
+JOINED_ZIP = "savedmodels2_2.zip"
+EXTRACT_DIR = "savedmodels2"
+
+if not os.path.exists(EXTRACT_DIR):
+    with open(JOINED_ZIP, "wb") as outfile:
+        for part in SPLIT_PARTS:
+            with open(part, "rb") as infile:
+                shutil.copyfileobj(infile, outfile)
+    with zipfile.ZipFile(JOINED_ZIP, "r") as zip_ref:
+        zip_ref.extractall(EXTRACT_DIR)
 
 # --- CONFIG ---
-st.set_page_config(page_title="Leukemia Subtype Classifier", layout="wide")
+st.set_page_config(page_title="Leukemia Subtype Detection", layout="wide")
 IMG_SIZE = (224, 224)
 CLASS_NAMES = ['Benign', 'Early-Precursor', 'Precursor', 'Pro-lymphoblast']
 NUM_CLASSES = 4
-
-# --- UNZIP SPLIT FILES ---
-if not os.path.exists("savedmodels2"):
-    st.warning("📦 Extracting model files... Please wait.")
-    split_files = sorted(glob.glob("savedmodels2_2.zip.*"))
-    with open("savedmodels2_2.zip", "wb") as f_out:
-        for part in split_files:
-            with open(part, "rb") as f_in:
-                f_out.write(f_in.read())
-    with zipfile.ZipFile("savedmodels2_2.zip", 'r') as zip_ref:
-        zip_ref.extractall("savedmodels2")
-    st.success("✅ Models extracted!")
-
-SAVE_DIR = "savedmodels2"
 MODEL_CONFIGS = {
     "DenseNet121": DenseNet121,
     "InceptionV3": InceptionV3,
     "MobileNetV2": MobileNetV2
 }
 
-# --- FUNCTIONS ---
+# --- HELPER FUNCTIONS ---
 def load_model_weights(model_name, base_fn):
     base = base_fn(include_top=False, weights=None, input_shape=(224, 224, 3))
     x = GlobalAveragePooling2D()(base.output)
@@ -44,7 +45,7 @@ def load_model_weights(model_name, base_fn):
     x = Dense(128, activation='relu', kernel_regularizer=l2(0.001))(x)
     output = Dense(NUM_CLASSES, activation='softmax')(x)
     model = Model(inputs=base.input, outputs=output, name=model_name)
-    weight_path = os.path.join(SAVE_DIR, model_name, f"{model_name}.weights.h5")
+    weight_path = os.path.join(EXTRACT_DIR, model_name, f"{model_name}.weights.h5")
     model.load_weights(weight_path)
     return model
 
@@ -58,9 +59,11 @@ def get_gradcam(model, img_array):
     pred_index = np.argmax(model.predict(img_array)[0])
     last_conv = next(layer.name for layer in reversed(model.layers) if 'conv' in layer.name.lower())
     grad_model = Model([model.inputs], [model.get_layer(last_conv).output, model.output])
+
     with tf.GradientTape() as tape:
         conv_outputs, predictions = grad_model(img_array)
         loss = predictions[:, pred_index]
+
     grads = tape.gradient(loss, conv_outputs)[0]
     pooled_grads = tf.reduce_mean(grads, axis=(0, 1))
     conv_outputs = conv_outputs[0]
@@ -80,68 +83,70 @@ def ensemble_prediction(models, img_array):
     avg_pred = np.mean(preds, axis=0)
     return avg_pred
 
-# --- SIDEBAR & LOAD MODELS ---
-st.sidebar.title("🧠 Leukemia Predictor")
-with st.sidebar:
-    st.markdown("This app classifies microscopic images into leukemia subtypes using 3 pre-trained models.")
-    st.markdown("---")
-    st.markdown("📦 Loading models...")
+# --- LOAD MODELS ---
+st.sidebar.title("🔬 Leukemia Detection Inference")
+st.sidebar.markdown("Models used: DenseNet121, InceptionV3, MobileNetV2")
+
+with st.spinner("Loading models..."):
     models = {}
     for name in MODEL_CONFIGS:
-        model = load_model_weights(name, MODEL_CONFIGS[name])
+        model_fn = MODEL_CONFIGS[name]
+        model = load_model_weights(name, model_fn)
         models[name] = model
-    st.success("Models loaded.")
 
-# --- MAIN APP ---
-st.title("🩸 Leukemia Subtype Classifier with Grad-CAM")
-st.markdown("Upload a microscopic blood cell image to get predictions from AI models and compare them to how doctors diagnose.")
+# --- MAIN UI ---
+st.title("🧬 Leukemia Subtype Detection with Grad-CAM")
 
-uploaded_file = st.file_uploader("📤 Upload a blood cell image (jpg/png)", type=["jpg", "jpeg", "png"])
-submit_btn = st.button("🔍 Diagnose Image")
+uploaded_file = st.file_uploader("📂 Upload a Microscopic Cell Image", type=["jpg", "jpeg", "png"])
+enable_button = st.button("🔎 Analyze Image")
 
-if uploaded_file and submit_btn:
+if uploaded_file and enable_button:
+    col1, col2 = st.columns([2, 2])
     img_array, original_img = preprocess_image(uploaded_file)
-    col1, col2 = st.columns([2, 1])
-    with col1:
-        st.image(original_img, caption="🖼 Uploaded Image", use_column_width=True)
-    with col2:
-        st.subheader("📊 Predictions")
-        results = {}
-        for name, model in models.items():
-            pred = model.predict(img_array)[0]
-            results[name] = pred
-            st.write(f"{name}** → {CLASS_NAMES[np.argmax(pred)]} ({100 * np.max(pred):.2f}%)")
+    col1.image(original_img, caption="Uploaded Image", use_column_width=True)
 
-    # Ensemble prediction
-    st.subheader("🤝 Ensemble Prediction")
+    # --- Model Predictions ---
+    st.subheader("📊 Prediction Results")
+    results = {}
+    for name, model in models.items():
+        pred = model.predict(img_array)[0]
+        results[name] = pred
+        pred_class = CLASS_NAMES[np.argmax(pred)]
+        st.success(f"{name} → {pred_class} ({100 * np.max(pred):.2f}%)")
+
+    # --- Ensemble Prediction ---
+    st.markdown("---")
+    st.subheader("🤝 Ensemble Result")
     final_pred = ensemble_prediction(models, img_array)
-    st.success(f"*Predicted Subtype:* {CLASS_NAMES[np.argmax(final_pred)]}")
+    st.info(f"Final Prediction: *{CLASS_NAMES[np.argmax(final_pred)]}*")
     st.bar_chart(final_pred)
 
-    # Optional Grad-CAM
+    # --- Grad-CAM ---
     if st.checkbox("🧠 Show Grad-CAM Visualizations"):
-        st.subheader("Grad-CAM (Model Focus Regions)")
+        st.markdown("## 🔬 Grad-CAMs for Each Model")
         for name, model in models.items():
             heatmap = get_gradcam(model, img_array)
             overlay = overlay_heatmap(heatmap, original_img)
-            st.image(overlay, caption=f"Grad-CAM for {name}", use_column_width=True)
-        st.markdown("### 📌 Ensemble Grad-CAM")
+            st.image(overlay, caption=f"Grad-CAM: {name}", use_column_width=True)
+
+        # --- Ensemble Grad-CAM ---
+        st.subheader("🎯 Ensemble Grad-CAM")
         heatmaps = [get_gradcam(model, img_array) for model in models.values()]
         avg_heatmap = np.uint8(np.mean(heatmaps, axis=0))
         overlay = overlay_heatmap(avg_heatmap, original_img)
         st.image(overlay, caption="Ensemble Grad-CAM", use_column_width=True)
 
-    # Doctor Panel
+    # --- Doctor Reasoning ---
     st.markdown("---")
-    st.subheader("🧬 How Doctors Diagnose")
-    with st.expander("🔍 Key visual markers doctors look for"):
+    st.subheader("🔍 Comparison with Doctor's Diagnosis")
+    with st.expander("🔎 What Doctors Look For in Leukemia Diagnosis"):
         st.markdown("""
-        - *Nucleus-to-Cytoplasm Ratio:* Higher in leukemia cells.
-        - *Irregular Nucleus Shape:* More common in abnormal blasts.
-        - *Granules & Auer Rods:* Important in differentiating AML.
-        - *Chromatin Texture:* Fine and immature in malignant cells.
+        - **Nucleus-to-Cytoplasm Ratio**: High in leukemia cells.
+        - **Nuclear Irregularity**: Irregular, folded, or lobulated nuclei.
+        - **Chromatin Texture**: Coarse, uneven chromatin distribution.
+        - **Presence of Granules**: May indicate blast cells.
+        - **Blast Cell Proportion**: Greater than 20% in many cases.
         """)
-        st.image("https://i.imgur.com/TVf3f5L.png", caption="Example of nucleus differences", use_column_width=True)
 
 else:
-    st.info("📂 Please upload an image and click 'Diagnose Image' to begin.")
+    st.warning("📁 Upload an image and press the 'Analyze Image' button to begin.")
