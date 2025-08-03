@@ -144,4 +144,4 @@ if uploaded_file and submit_btn:
         st.image("https://i.imgur.com/TVf3f5L.png", caption="Example of nucleus differences", use_column_width=True)
 
 else:
-    st.info("📂 Please upload an image and click 'Diagnose Image' to begin.")gi
+    st.info("📂 Please upload an image and click 'Diagnose Image' to begin.")
