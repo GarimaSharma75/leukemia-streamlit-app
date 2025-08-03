@@ -1,3 +1,10 @@
+import zipfile
+
+# --- Unzip models if not already extracted ---
+if not os.path.exists("savedmodels2"):
+    with zipfile.ZipFile("savedmodels2.zip", 'r') as zip_ref:
+        zip_ref.extractall(".")
+
 import streamlit as st
 import numpy as np
 import os
