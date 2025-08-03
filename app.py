@@ -2,24 +2,32 @@ import streamlit as st
 import numpy as np
 import os
 import cv2
-import zipfile
 import tensorflow as tf
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import GlobalAveragePooling2D, Dense, Dropout
 from tensorflow.keras.applications import DenseNet121, InceptionV3, MobileNetV2
 from tensorflow.keras.preprocessing import image as keras_image
 from tensorflow.keras.regularizers import l2
+import zipfile
+import glob
 
 # --- CONFIG ---
-st.set_page_config(page_title="Leukemia Subtype Detector", layout="wide")
-st.markdown(
-    "<h1 style='text-align: center; color: #e63946;'>🔬 Leukemia Subtype Detection using Ensemble Deep Learning</h1>",
-    unsafe_allow_html=True,
-)
-
+st.set_page_config(page_title="Leukemia Subtype Classifier", layout="wide")
 IMG_SIZE = (224, 224)
-CLASS_NAMES = ['Benign', 'Early', 'Pre', 'Pro']
+CLASS_NAMES = ['Benign', 'Early-Precursor', 'Precursor', 'Pro-lymphoblast']
 NUM_CLASSES = 4
+
+# --- UNZIP SPLIT FILES ---
+if not os.path.exists("savedmodels2"):
+    st.warning("📦 Extracting model files... Please wait.")
+    split_files = sorted(glob.glob("savedmodels2_2.zip.*"))
+    with open("savedmodels2_2.zip", "wb") as f_out:
+        for part in split_files:
+            with open(part, "rb") as f_in:
+                f_out.write(f_in.read())
+    with zipfile.ZipFile("savedmodels2_2.zip", 'r') as zip_ref:
+        zip_ref.extractall("savedmodels2")
+    st.success("✅ Models extracted!")
 
 SAVE_DIR = "savedmodels2"
 MODEL_CONFIGS = {
@@ -28,22 +36,7 @@ MODEL_CONFIGS = {
     "MobileNetV2": MobileNetV2
 }
 
-# --- Extract ZIP if necessary ---
-if not os.path.exists(SAVE_DIR):
-    try:
-        with open("savedmodels2_full.zip", "wb") as full_zip:
-            for part in ["savedmodels2_2.zip.001", "savedmodels2_2.zip.002"]:
-                with open(part, "rb") as pf:
-                    full_zip.write(pf.read())
-        with zipfile.ZipFile("savedmodels2_full.zip", "r") as zip_ref:
-            zip_ref.extractall(SAVE_DIR)
-        os.remove("savedmodels2_full.zip")
-        st.success("✅ Models extracted successfully.")
-    except Exception as e:
-        st.error(f"❌ Error extracting models: {e}")
-
-# --- Load Model ---
-@st.cache_resource
+# --- FUNCTIONS ---
 def load_model_weights(model_name, base_fn):
     base = base_fn(include_top=False, weights=None, input_shape=(224, 224, 3))
     x = GlobalAveragePooling2D()(base.output)
@@ -51,14 +44,15 @@ def load_model_weights(model_name, base_fn):
     x = Dense(128, activation='relu', kernel_regularizer=l2(0.001))(x)
     output = Dense(NUM_CLASSES, activation='softmax')(x)
     model = Model(inputs=base.input, outputs=output, name=model_name)
-    weights_path = os.path.join(SAVE_DIR, model_name, f"{model_name}.weights.h5")
-    model.load_weights(weights_path)
+    weight_path = os.path.join(SAVE_DIR, model_name, f"{model_name}.weights.h5")
+    model.load_weights(weight_path)
     return model
 
 def preprocess_image(uploaded_file):
     img = keras_image.load_img(uploaded_file, target_size=IMG_SIZE)
     img_array = keras_image.img_to_array(img)
-    return np.expand_dims(img_array, axis=0) / 255.0, np.array(img)
+    img_array = np.expand_dims(img_array, axis=0) / 255.0
+    return img_array, np.array(img)
 
 def get_gradcam(model, img_array):
     pred_index = np.argmax(model.predict(img_array)[0])
@@ -78,77 +72,76 @@ def get_gradcam(model, img_array):
 def overlay_heatmap(heatmap, image):
     heatmap = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
     image = cv2.resize(np.array(image), IMG_SIZE)
-    return cv2.addWeighted(image, 0.6, heatmap, 0.4, 0)
+    overlay = cv2.addWeighted(image, 0.6, heatmap, 0.4, 0)
+    return overlay
 
 def ensemble_prediction(models, img_array):
     preds = [model.predict(img_array)[0] for model in models.values()]
-    return np.mean(preds, axis=0)
+    avg_pred = np.mean(preds, axis=0)
+    return avg_pred
 
-# --- SIDEBAR ---
-st.sidebar.header("🩸 Upload Blood Cell Image")
-uploaded_file = st.sidebar.file_uploader("Choose an image...", type=["jpg", "jpeg", "png"])
-show_cam = st.sidebar.checkbox("Show Grad-CAMs", value=True)
-analyze = st.sidebar.button("🔍 Run Inference")
-
-# --- Load Models ---
-with st.spinner("🔄 Loading all models..."):
-    models = {name: load_model_weights(name, fn) for name, fn in MODEL_CONFIGS.items()}
-
-# --- MAIN LOGIC ---
-if analyze and uploaded_file:
-    img_array, original_img = preprocess_image(uploaded_file)
-    st.image(original_img, caption="🖼️ Uploaded Cell Image", use_column_width=False, width=300)
-
-    st.markdown("## 📊 Prediction Results")
-    results = {}
-    for name, model in models.items():
-        pred = model.predict(img_array)[0]
-        results[name] = pred
-        pred_class = CLASS_NAMES[np.argmax(pred)]
-        confidence = 100 * np.max(pred)
-        st.markdown(f"""
-        <div style='padding:10px; border-radius:8px; background-color:#f1faee; margin-bottom:10px;'>
-            <b style='color:#1d3557;'>{name}</b>: <span style='color:#e63946;'>{pred_class}</span>
-            <br>Confidence: <b>{confidence:.2f}%</b>
-        </div>
-        """, unsafe_allow_html=True)
-        st.progress(float(np.max(pred)))
-
+# --- SIDEBAR & LOAD MODELS ---
+st.sidebar.title("🧠 Leukemia Predictor")
+with st.sidebar:
+    st.markdown("This app classifies microscopic images into leukemia subtypes using 3 pre-trained models.")
     st.markdown("---")
+    st.markdown("📦 Loading models...")
+    models = {}
+    for name in MODEL_CONFIGS:
+        model = load_model_weights(name, MODEL_CONFIGS[name])
+        models[name] = model
+    st.success("Models loaded.")
+
+# --- MAIN APP ---
+st.title("🩸 Leukemia Subtype Classifier with Grad-CAM")
+st.markdown("Upload a microscopic blood cell image to get predictions from AI models and compare them to how doctors diagnose.")
+
+uploaded_file = st.file_uploader("📤 Upload a blood cell image (jpg/png)", type=["jpg", "jpeg", "png"])
+submit_btn = st.button("🔍 Diagnose Image")
+
+if uploaded_file and submit_btn:
+    img_array, original_img = preprocess_image(uploaded_file)
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        st.image(original_img, caption="🖼 Uploaded Image", use_column_width=True)
+    with col2:
+        st.subheader("📊 Predictions")
+        results = {}
+        for name, model in models.items():
+            pred = model.predict(img_array)[0]
+            results[name] = pred
+            st.write(f"{name}** → {CLASS_NAMES[np.argmax(pred)]} ({100 * np.max(pred):.2f}%)")
+
+    # Ensemble prediction
     st.subheader("🤝 Ensemble Prediction")
     final_pred = ensemble_prediction(models, img_array)
-    final_class = CLASS_NAMES[np.argmax(final_pred)]
-    st.success(f"✅ Final Predicted Subtype: **{final_class}**")
+    st.success(f"*Predicted Subtype:* {CLASS_NAMES[np.argmax(final_pred)]}")
     st.bar_chart(final_pred)
 
-    if show_cam:
-        st.markdown("---")
-        st.subheader("🧠 Grad-CAM Visualizations")
-        cols = st.columns(3)
-        for i, (name, model) in enumerate(models.items()):
+    # Optional Grad-CAM
+    if st.checkbox("🧠 Show Grad-CAM Visualizations"):
+        st.subheader("Grad-CAM (Model Focus Regions)")
+        for name, model in models.items():
             heatmap = get_gradcam(model, img_array)
             overlay = overlay_heatmap(heatmap, original_img)
-            cols[i].image(overlay, caption=f"Grad-CAM: {name}", use_column_width=True)
-
-        st.markdown("### 🤝 Ensemble Grad-CAM")
+            st.image(overlay, caption=f"Grad-CAM for {name}", use_column_width=True)
+        st.markdown("### 📌 Ensemble Grad-CAM")
         heatmaps = [get_gradcam(model, img_array) for model in models.values()]
         avg_heatmap = np.uint8(np.mean(heatmaps, axis=0))
         overlay = overlay_heatmap(avg_heatmap, original_img)
         st.image(overlay, caption="Ensemble Grad-CAM", use_column_width=True)
 
+    # Doctor Panel
     st.markdown("---")
-    st.subheader("🩺 Compare with Doctor’s Observations")
-    st.markdown("""
-    <div style='background-color:#f8edeb; padding:20px; border-radius:8px;'>
-        <ul>
-            <li><b>Nucleus-to-Cytoplasm Ratio:</b> High in leukemic blasts</li>
-            <li><b>Granules & Auer Rods:</b> Present in AML cells</li>
-            <li><b>Chromatin Texture:</b> Fine & immature in leukemia</li>
-            <li><b>Irregular Nuclei:</b> Lobulated or misshaped in T-ALL</li>
-            <li><b>Blast Size:</b> Large and inconsistent in malignancy</li>
-        </ul>
-    </div>
-    """, unsafe_allow_html=True)
+    st.subheader("🧬 How Doctors Diagnose")
+    with st.expander("🔍 Key visual markers doctors look for"):
+        st.markdown("""
+        - *Nucleus-to-Cytoplasm Ratio:* Higher in leukemia cells.
+        - *Irregular Nucleus Shape:* More common in abnormal blasts.
+        - *Granules & Auer Rods:* Important in differentiating AML.
+        - *Chromatin Texture:* Fine and immature in malignant cells.
+        """)
+        st.image("https://i.imgur.com/TVf3f5L.png", caption="Example of nucleus differences", use_column_width=True)
 
 else:
-    st.info("📂 Upload an image from sidebar and click **Run Inference** to begin.")
+    st.info("📂 Please upload an image and click 'Diagnose Image' to begin.")gi
